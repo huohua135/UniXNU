@@ -1,0 +1,111 @@
+name: Firmware build (caihong)
+
+on:
+  workflow_dispatch:
+    inputs:
+      uefi_repository:
+        description: Mu-Silicium checkout that carries the caihong platform package
+        required: true
+        default: huohua135/uefi-caihong
+      uefi_ref:
+        description: Ref of that repository
+        required: true
+        default: sheng
+      device_repository:
+        description: Device repository (source of the uefi overlay)
+        required: true
+        default: huohua135/UniXNU-caihong
+      device_ref:
+        description: Device repository ref
+        required: true
+        default: main
+      model:
+        description: Model index passed to build_uefi.py
+        required: true
+        default: "0"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    # The overlay FDF packs CaihongInitrdDxe, UniXNU, UniXNUDxe and DarwinBoot; the CI
+    # artifact built without the overlay (fd-caihong of 2026-10-22) only carried
+    # UniXNU and UniXNUDxe, which is why that image never lit the panel.
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Check out UniXNU
+        uses: actions/checkout@v4
+        with:
+          path: unixnu
+          persist-credentials: false
+
+      - name: Check out the device repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.device_repository }}
+          ref: ${{ inputs.device_ref }}
+          path: device
+          token: ${{ secrets.UNIXNU_DEVICE_TOKEN || github.token }}
+
+      - name: Check out the Mu-Silicium base
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.uefi_repository }}
+          ref: ${{ inputs.uefi_ref }}
+          path: uefi
+          submodules: recursive
+          token: ${{ secrets.UNIXNU_DEVICE_TOKEN || github.token }}
+
+      - name: Apply the device overlay
+        run: |
+          set -euxo pipefail
+          cp -r device/uefi-overlay/Platforms/. uefi/Platforms/
+          cp -r device/uefi-overlay/Resources/. uefi/Resources/
+          cp device/uefi-overlay/build_uefi.py uefi/build_uefi.py
+          cp device/uefi-overlay/UniXNU/package/UniXNUPkg/Library/UniXNULib/Main.c \
+             unixnu/package/UniXNUPkg/Library/UniXNULib/Main.c
+          # build_uefi.py expects the UniXNU tree beside it
+          rm -rf uefi/UniXNU
+          ln -sfn "$PWD/unixnu" uefi/UniXNU
+          ls -l uefi/Platforms/OnePlus/caihongPkg
+          grep -c 'INF ' uefi/Platforms/OnePlus/caihongPkg/caihong.fdf
+          grep -E 'CaihongInitrdDxe|DarwinBoot' uefi/Platforms/OnePlus/caihongPkg/caihong.fdf
+
+      - name: Install the host tools
+        run: |
+          sudo sh -c 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'
+          sudo apt-get -o Acquire::Retries=10 update
+          sudo apt-get install -y --no-install-recommends clang lld cmake ninja-build python3 \
+            python3-pip uuid-dev libssl-dev device-tree-compiler mtools build-essential
+
+      - name: Build the firmware
+        working-directory: uefi
+        run: |
+          set -o pipefail
+          python3 build_uefi.py -d caihong -m ${{ inputs.model }} -r RELEASE 2>&1 | tail -n 200
+
+      - name: Show the products
+        if: always()
+        run: |
+          ls -l uefi/Build/*/RELEASE_CLANGPDB/FV/* 2>/dev/null || true
+          ls -l uefi/Mu-*.img 2>/dev/null || true
+          sha256sum uefi/Build/*/RELEASE_CLANGPDB/FV/*.fd uefi/Mu-*.img 2>/dev/null || true
+
+      - name: Upload the firmware
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-caihong-${{ github.run_attempt }}
+          path: |
+            uefi/Build/*/RELEASE_CLANGPDB/FV/*.fd
+            uefi/Build/*/RELEASE_CLANGPDB/FV/*.gz
+            uefi/Mu-*.img
+            uefi/BootShim/BootShim.bin
+          if-no-files-found: warn
+          retention-days: 14
