@@ -94,19 +94,22 @@ jobs:
 
       - name: Wait for working DNS and apt mirrors
         run: |
-          # The hosted runner occasionally comes up before DNS resolves the Ubuntu mirrors; a
-          # single apt run then dies on "Temporary failure resolving". Probe until it works.
-          for attempt in $(seq 1 10); do
-            if getent hosts archive.ubuntu.com >/dev/null && getent hosts security.ubuntu.com >/dev/null; then
+          # The hosted runner comes up with systemd-resolved (127.0.0.53) and cannot resolve
+          # archive.ubuntu.com from it; pointing resolv.conf at public resolvers fixes apt.
+          # Probed in env-probe.yml: default DNS fails, 1.1.1.1 resolves and apt updates in <1 s.
+          sudo sh -c 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'
+          cat /etc/resolv.conf
+          for attempt in $(seq 1 6); do
+            if getent hosts archive.ubuntu.com >/dev/null; then
               echo "DNS ok on attempt $attempt"
               sudo apt-get -o Acquire::Retries=10 -o Acquire::http::Timeout=30 update && exit 0
               echo "apt update failed, retrying"
             else
               echo "DNS not ready, attempt $attempt"
             fi
-            sleep 20
+            sleep 10
           done
-          echo "::error::apt mirrors unreachable after 10 attempts"
+          echo "::error::apt mirrors unreachable"
           exit 1
 
       - name: Install the Linux toolchain
