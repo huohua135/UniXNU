@@ -1,0 +1,30 @@
+name: env probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: dns before
+        run: |
+          cat /etc/resolv.conf || true
+          getent hosts archive.ubuntu.com || echo "getent failed"
+          getent hosts github.com || echo "getent github failed"
+          python3 -c "import socket;print(socket.getaddrinfo('archive.ubuntu.com',80)[:1])" || echo "python dns failed"
+      - name: dns after public resolver
+        run: |
+          sudo sh -c 'echo "nameserver 1.1.1.1" > /etc/resolv.conf; echo "nameserver 8.8.8.8" >> /etc/resolv.conf'
+          cat /etc/resolv.conf
+          getent hosts archive.ubuntu.com || echo "still failing"
+          sudo apt-get -o Acquire::Retries=3 update || echo "apt update failed"
+      - name: preinstalled tools
+        run: |
+          for t in clang clang++ ld.lld lld llvm-config llvm-config-18 cmake ninja dtc mformat mcopy unifdef bison flex git python3 pkg-config; do
+            printf '%-16s %s\n' "$t" "$(command -v $t || echo MISSING)"
+          done
+          clang --version | head -n 2 || true
+          ls /usr/lib/llvm-* -d 2>/dev/null || true
+          dpkg -l | grep -E 'llvm|clang|libbsd|uuid-dev|mtools|device-tree' | awk '{print $2, $3}' | head -30 || true
