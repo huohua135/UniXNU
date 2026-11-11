@@ -52,6 +52,7 @@ jobs:
       DEFCONFIG: ${{ inputs.defconfig }}
       STEPS: ${{ inputs.steps }}
       DEBIAN_FRONTEND: noninteractive
+      UNIXNU_TOOLCHAIN: ${{ github.workspace }}/.toolchain
     steps:
       - name: Check out UniXNU
         uses: actions/checkout@v4
@@ -112,11 +113,17 @@ jobs:
           echo "::error::apt mirrors unreachable"
           exit 1
 
+      - name: Cache the UniXNU host toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.toolchain
+          key: unixnu-toolchain-${{ runner.os }}-${{ hashFiles('scripts/linux/setup-toolchain.py', 'scripts/linux/*.patch', 'scripts/linux/clang', 'scripts/linux/xcrun') }}
+
       - name: Install the Linux toolchain
         run: |
           python3 scripts/linux/setup-toolchain.py --print-packages
           for attempt in $(seq 1 3); do
-            if sudo -E python3 scripts/linux/setup-toolchain.py; then
+            if sudo -E python3 scripts/linux/setup-toolchain.py "$UNIXNU_TOOLCHAIN"; then
               echo "toolchain installed on attempt $attempt"
               exit 0
             fi
@@ -152,6 +159,18 @@ jobs:
         id: payload
         if: contains(inputs.steps, 'payload')
         run: ./unixnu build payload
+
+      - name: Upload the kernel product
+        if: always() && steps.kernel.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ steps.check.outputs.board }}-${{ github.run_attempt }}
+          path: |
+            out/*/*/*/kernel/kernel.macho
+            out/*/*/*/kernel/*.adt
+            out/*/*/*/kernel/*.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Collect the text logs
         id: logs
