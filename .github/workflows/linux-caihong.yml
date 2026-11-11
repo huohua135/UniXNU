@@ -166,6 +166,9 @@ jobs:
         with:
           name: kernel-${{ steps.check.outputs.board }}-${{ github.run_attempt }}
           path: |
+            out/*/kernel/kernel.macho
+            out/*/kernel/*.adt
+            out/*/kernel/*.json
             out/*/*/*/kernel/kernel.macho
             out/*/*/*/kernel/*.adt
             out/*/*/*/kernel/*.json
