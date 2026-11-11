@@ -1,0 +1,20 @@
+name: runner probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: info
+        run: |
+          uname -a
+          sw_vers
+          xcodebuild -version || true
+          ls /Applications | grep -i xcode || true
