@@ -1,0 +1,163 @@
+name: Linux build (caihong)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device_repository:
+        description: Device repository as owner/name
+        required: true
+        default: huohua135/UniXNU-caihong
+      device_ref:
+        description: Device repository ref
+        required: true
+        default: main
+      defconfig:
+        description: Defconfig name (configs/ of the device repository)
+        required: true
+        default: caihong_defconfig
+      steps:
+        description: Steps to build (text logs only)
+        type: choice
+        options:
+          - kernel
+          - kernel payload
+        default: kernel
+      ipsw_url:
+        description: IPSW URL (empty uses board.toml)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-build-${{ github.ref }}-${{ inputs.device_repository }}-${{ inputs.device_ref }}-${{ inputs.defconfig }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    # The GitHub-hosted macOS runners are not available to this account (every macOS job is
+    # cancelled before a runner is assigned), so the kernel is built through the Linux path:
+    # scripts/linux/setup-toolchain.py installs clang/lld/EDK2 prerequisites and the xnu driver
+    # selects prepare-xnu.py on a Linux host.
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      UNIXNU_DEVICE: ${{ github.workspace }}/device
+      UNIXNU_IPSW: ${{ inputs.ipsw_url }}
+      DEFCONFIG: ${{ inputs.defconfig }}
+      STEPS: ${{ inputs.steps }}
+    steps:
+      - name: Check out UniXNU
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out the device repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.device_repository }}
+          ref: ${{ inputs.device_ref }}
+          path: device
+          token: ${{ secrets.UNIXNU_DEVICE_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check the inputs
+        id: check
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [ -f device/board.toml ] || fail "the device repository has no board.toml"
+          [ -f "device/configs/$DEFCONFIG" ] || fail "device/configs/$DEFCONFIG not found: $(cd device/configs 2>/dev/null && printf '%s ' *_defconfig)"
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'scripts')
+          from unixnu.cli import parser, cmd_defconfig
+          from unixnu.config import Context
+          ctx = Context(parser().parse_args(['defconfig', os.environ['DEFCONFIG']]))
+          cmd_defconfig(ctx)
+          board = ctx.board
+          name = board.get('board', {}).get('name')
+          if not name:
+              sys.exit('::error::board.toml needs [board] name')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'board={name}\n')
+              out.write(f'work={ctx.work}\n')
+          PY
+
+      - name: Install the Linux toolchain
+        run: |
+          python3 scripts/linux/setup-toolchain.py --print-packages
+          sudo python3 scripts/linux/setup-toolchain.py
+
+      - name: Report the runner toolchain
+        run: |
+          uname -a
+          cat /etc/os-release | head -n 2
+          clang --version | head -n 1
+          python3 --version
+          missing=0
+          for tool in git make clang ld.lld cmake ninja unifdef mformat mcopy dtc; do
+            path=$(command -v "$tool" || true)
+            printf '%-10s %s\n' "$tool" "${path:-MISSING}"
+            [ -n "$path" ] || missing=1
+          done
+          df -h "$GITHUB_WORKSPACE" || true
+          exit "$missing"
+
+      - name: Build kernel
+        id: kernel
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./unixnu build kernel
+
+      - name: Build payload
+        id: payload
+        if: contains(inputs.steps, 'payload')
+        run: ./unixnu build payload
+
+      - name: Collect the text logs
+        id: logs
+        if: always() && steps.check.outcome == 'success'
+        env:
+          BOARD: ${{ steps.check.outputs.board }}
+          WORK: ${{ steps.check.outputs.work }}
+        run: |
+          python3 - <<'PY'
+          import os, re, shutil
+          from pathlib import Path
+          source = Path(os.environ['WORK']) / 'logs'
+          target = Path(os.environ['RUNNER_TEMP']) / 'public-logs'
+          shutil.rmtree(target, ignore_errors=True)
+          target.mkdir(parents=True)
+          count = 0
+          for path in sorted(source.glob('*.log')) if source.is_dir() else []:
+              data = path.read_bytes()
+              if b'\0' in data:
+                  continue
+              text = data.decode('utf-8', 'replace')
+              text = re.sub(r'https?://[^\s"\']*[?&](?:token|sig|signature|key|X-Amz-Signature)=[^\s"\']*', '***', text, flags=re.I)
+              (target / path.name).write_text(text)
+              count += 1
+          print(f'{count} text logs staged')
+          PY
+
+      - name: Upload the build logs
+        if: always() && steps.logs.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unixnu-${{ steps.check.outputs.board }}-linux-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/public-logs/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Remove proprietary inputs
+        if: always()
+        run: |
+          rm -rf out/ipsw out/feeds device/.cache/firmware out/*/tree/.cache/firmware || true
