@@ -81,8 +81,15 @@ jobs:
         run: |
           sudo sh -c 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'
           sudo apt-get -o Acquire::Retries=10 update
-          sudo apt-get install -y --no-install-recommends clang lld cmake ninja-build python3 \
+          sudo apt-get install -y --no-install-recommends clang lld llvm cmake ninja-build python3 \
             python3-pip uuid-dev libssl-dev device-tree-compiler mtools build-essential
+          # BootShim's Makefile calls llvm-objcopy; some images only ship versioned names
+          for v in 22 21 20 19 18; do
+            if [ -x "/usr/bin/llvm-objcopy-$v" ] && ! command -v llvm-objcopy >/dev/null; then
+              sudo ln -sf "/usr/bin/llvm-objcopy-$v" /usr/local/bin/llvm-objcopy
+            fi
+          done
+          command -v llvm-objcopy || (sudo apt-get install -y llvm-19 && sudo ln -sf /usr/bin/llvm-objcopy-19 /usr/local/bin/llvm-objcopy)
           # build_uefi.py imports coloredlogs and the edk2 python tooling
           python3 -m pip install --break-system-packages --no-input -r uefi/pip-requirements.txt
 
